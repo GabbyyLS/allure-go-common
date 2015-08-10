@@ -1,75 +1,132 @@
 package allure
 
+import (
+    "github.com/GabbyyLS/allure-go-common/beans"
+    "time"
+    "bytes"
+    "errors"
+//    "mime"
+    "code.google.com/p/go-uuid/uuid"
+    "io/ioutil"
+    "path/filepath"
+    "os"
+    "encoding/xml"
+)
+
 //
 type Allure struct {
-    Suites []string
-    TargetDir string
+	Suites    []*beans.Suite
+	TargetDir string
 }
 
-
 //SetOptions()js -> New
-func New(suites []string) *Allure {
-  return &Allure{Suites:suites,TargetDir:"allure-results"}
+func New(suites []*beans.Suite) *Allure {
+	return &Allure{Suites: suites, TargetDir: "allure-results"}
 }
 
 //getCurrentSuite -> 0
-func (a Allure) GetCurrentSuite () string {
-  return a.Suites[0]
+func (a *Allure) GetCurrentSuite() *beans.Suite {
+	return a.Suites[0]
 }
 
 
-/*
-func (a *Allure) StartSuite() {
-    this.suites.unshift(new Suite(suiteName, timestamp));
+func (a *Allure) StartSuite(name string,start time.Time) {
+    a.Suites = append(a.Suites,beans.NewSuite(name,start))
 }
 
 
-Allure.prototype.endSuite = function(timestamp) {
-    var suite = this.getCurrentSuite();
-    suite.end(timestamp);
-    if(suite.hasTests()) {
-        writer.writeSuite(this.options.targetDir, suite.toXML());
+func (a *Allure) EndSuite (end time.Time) {
+    suite := a.GetCurrentSuite()
+    suite.End(end)
+    if(suite.HasTests()) {
+        writeSuite(a.TargetDir,suite)
     }
-    this.suites.shift();
-};
+    //remove first/current suite
+    a.Suites = a.Suites[1:]
+}
 
-Allure.prototype.startCase = function(testName, timestamp) {
-    var test = new Test(testName, timestamp),
-        suite = this.getCurrentSuite();
-    suite.currentTest = test;
-    suite.currentStep = test;
-    suite.addTest(test);
-};
+var currentState = map[*beans.Suite]*beans.TestCase{}
+var currentStep = map[*beans.Suite]*beans.Step{}
 
-Allure.prototype.endCase = function(status, err, timestamp) {
-    var suite = this.getCurrentSuite();
-    suite.currentTest.end(status, err, timestamp);
-    suite.currentTest = null;
-};
+func (a *Allure) StartCase (testName string, start time.Time) {
+    var (
+        test = beans.NewTestCase(testName, start)
+        step = beans.NewStep(testName, start)
+        suite = a.GetCurrentSuite()
+    )
 
-Allure.prototype.startStep = function(stepName, timestamp) {
-    var step = new Step(stepName, timestamp),
-        suite = this.getCurrentSuite();
-    step.parent = suite.currentStep;
-    step.parent.addStep(step);
-    suite.currentStep = step;
-};
+    currentState[suite] = test
+    //strange logic((((
+    currentStep[suite] = step
 
-Allure.prototype.endStep = function(status, timestamp) {
-    var suite = this.getCurrentSuite();
-    suite.currentStep.end(status, timestamp);
-    suite.currentStep = suite.currentStep.parent;
-};
+    suite.AddTest(test)
+}
 
-Allure.prototype.addAttachment = function(attachmentName, buffer, type) {
-    var info = util.getBufferInfo(buffer, type),
-        name = writer.writeBuffer(this.options.targetDir, buffer, info.ext),
-        attachment = new Attachment(attachmentName, name, buffer.length, info.mime);
-    this.getCurrentSuite().currentTest.addAttachment(attachment);
-};
+func (a *Allure) EndCase (status string, err error, end time.Time) {
+    suite := a.GetCurrentSuite()
+    test, ok := currentState[suite]
+    if ok {
+        test.End(status,err,end)
+        currentState[suite]
+    }
+}
 
-Allure.prototype.pendingCase = function(testName, timestamp) {
-    this.startCase(testName, timestamp);
-    this.endCase('pending', {message: 'Test ignored'}, timestamp);
-};
-*/
+func (a *Allure) CreateStep(name string, stepFunc func() ) {
+    status := `passed`
+    a.StartStep(name,time.Now())
+    // if test error
+    stepFunc()
+    //end
+    a.EndStep(status,time.Now())
+}
+
+func (a *Allure) StartStep (stepName string, start time.Time) {
+    var (
+        step = beans.NewStep(stepName, start)
+        suite = a.GetCurrentSuite()
+    )
+
+    step = currentStep[suite]
+    step.Parent.AddStep(step)
+    currentStep[suite] = step
+}
+
+func (a *Allure) EndStep (status string, end time.Time) {
+    suite := a.GetCurrentSuite()
+    currentStep[suite].End(status, end)
+    currentStep[suite] = currentStep[suite].Parent
+}
+
+func (a *Allure) AddAttachment (attachmentName, buf bytes.Buffer, typ string) {
+    mime,ext := getBufferInfo(buf,typ)
+    name,_ := writeBuffer(a.TargetDir,buf,ext)
+    currentState[a.GetCurrentSuite()].AddAttachment(beans.NewAttachment(attachmentName,mime,name,buf.Len()))
+}
+
+func (a *Allure) PendingCase(testName string, start time.Time) {
+    a.StartCase(testName, start)
+    a.EndCase("pending", errors.New("Test ignored"), start)
+}
+
+//utils
+func getBufferInfo(buf bytes.Buffer, typ string) (string,string) {
+//    exts,err := mime.ExtensionsByType(typ)
+//    if err != nil {
+//        mime.ParseMediaType()
+//    }
+    return "text/plain","txt"
+}
+
+func writeBuffer(pathDir string,buf bytes.Buffer,ext string) (string,error) {
+    fileName := uuid.New()+`-attachment.`+ext
+    err := ioutil.WriteFile(filepath.Join(pathDir,fileName),buf.Bytes(),os.O_CREATE|os.O_WRONLY)
+    return fileName,err
+}
+
+func writeSuite(pathDir string,suite *beans.Suite) error {
+    bytes, err := xml.Marshal(suite)
+    if err != nil {
+        return err
+    }
+    return ioutil.WriteFile(filepath.Join(pathDir,uuid.New()+`-testsuite.xml`),bytes,os.O_CREATE|os.O_WRONLY)
+}
